@@ -16,4 +16,5 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$TEST_LIST_FILE"
 
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.6
 ./build/bin/evmone-unittests --gtest_filter="$FILTER_PARAM"
