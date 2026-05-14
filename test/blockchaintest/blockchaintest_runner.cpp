@@ -10,6 +10,7 @@
 #include <test/utils/rlp.hpp>
 #include <test/utils/rlp_encode.hpp>
 #include <test/utils/statetest.hpp>
+#include <cstdlib>
 
 namespace evmone::test
 {
@@ -315,6 +316,7 @@ void run_blockchain_tests(std::span<const BlockchainTest> tests, evmc::VM& vm)
                 // Block being valid guarantees its parent was found.
                 assert(parent_data_it != block_data.end());
                 const auto& pre_state = parent_data_it->second.post_state;
+
 
                 auto res = apply_block(pre_state, vm, bi, block_hashes, test_block.transactions,
                     rev, mining_reward(rev));

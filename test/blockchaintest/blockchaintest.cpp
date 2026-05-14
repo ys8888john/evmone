@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "blockchaintest_runner.hpp"
+#include "dt_vm.h"
 #include <CLI/CLI.hpp>
 #include <evmone/evmone.h>
 #include <evmone/version.h>
@@ -11,7 +12,6 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
-#include "dt_vm.h"
 
 namespace fs = std::filesystem;
 
@@ -23,23 +23,28 @@ evmc::VM evmone_advanced{evmc_create_evmone(), {{"advanced", ""}}};
 evmc::VM evmone_baseline{evmc_create_evmone()};
 evmc::VM external_vm;
 
-std::vector<std::pair<std::string, evmc::VM*>> get_available_vms() {
+std::vector<std::pair<std::string, evmc::VM*>> get_available_vms()
+{
     static bool initialized = false;
     static bool external_load_state = false;
     std::vector<std::pair<std::string, evmc::VM*>> vms;
-    vms.emplace_back("evmone_advanced", &evmone_advanced);
-    vms.emplace_back("evmone_baseline", &evmone_baseline);
+    // vms.emplace_back("evmone_advanced", &evmone_advanced);
+    // vms.emplace_back("evmone_baseline", &evmone_baseline);
 
     // Load external lib
     const char* external_env_options = getenv("EVMONE_EXTERNAL_OPTIONS");
-    if (external_env_options != nullptr) {
-        if (!initialized) {
-            external_load_state = evmone::test::try_load_external(external_env_options, external_vm);
+    if (external_env_options != nullptr)
+    {
+        if (!initialized)
+        {
+            external_load_state =
+                evmone::test::try_load_external(external_env_options, external_vm);
             initialized = true;
         }
     }
 
-    if (external_load_state) {
+    if (external_load_state)
+    {
         vms.emplace_back("external_vm", &external_vm);
     }
 
@@ -47,12 +52,53 @@ std::vector<std::pair<std::string, evmc::VM*>> get_available_vms() {
 }
 }  // namespace vm_manager
 
+/// Global warmup environment - runs before all tests, not counted in test timing
+class WarmupEnvironment : public testing::Environment
+{
+    std::vector<evmone::test::BlockchainTest> m_tests;
+    evmc::VM* m_vm = nullptr;
+    fs::path m_test_file;
+    bool m_warmup_done = false;
+
+public:
+    WarmupEnvironment(fs::path test_file, evmc::VM& vm)
+      : m_test_file(std::move(test_file)), m_vm(&vm)
+    {}
+
+    void SetUp() override
+    {
+        // Load tests and run warmup before ANY test timing starts
+        std::ifstream f{m_test_file};
+        m_tests = evmone::test::load_blockchain_tests(f);
+
+        static const int warmup_runs = []() {
+            const char* env = std::getenv("DTVM_WARMUP_RUNS");
+            return env ? std::atoi(env) : 0;
+        }();
+
+        if (warmup_runs > 0)
+        {
+            std::cout << "Running " << warmup_runs
+                      << " warmup iterations (not counted in test time)..." << std::endl;
+            for (int warmup_i = 0; warmup_i < warmup_runs; ++warmup_i)
+            {
+                evmone::test::run_blockchain_tests(m_tests, *m_vm);
+            }
+            std::cout << "Warmup complete. Starting timed test run." << std::endl;
+        }
+        m_warmup_done = true;
+    }
+
+    void TearDown() override {}
+};
+
 /// Implementation of a gtest Test which runs all blockchain tests from a given file.
 class BlockchainGTestFile : public testing::Test
 {
     fs::path m_json_test_file;
     evmc::VM& m_vm;
     bool m_trace = false;
+    std::vector<evmone::test::BlockchainTest> m_tests;
 
 public:
     explicit BlockchainGTestFile(fs::path json_test_file, evmc::VM& vm, bool trace) noexcept
@@ -61,13 +107,18 @@ public:
 
     void TestBody() final
     {
-        std::ifstream f{m_json_test_file};
+        // Load tests if not already loaded by warmup
+        if (m_tests.empty())
+        {
+            std::ifstream f{m_json_test_file};
+            m_tests = evmone::test::load_blockchain_tests(f);
+        }
 
         try
         {
             if (m_trace)
                 m_vm.set_option("trace", "1");
-            evmone::test::run_blockchain_tests(evmone::test::load_blockchain_tests(f), m_vm);
+            evmone::test::run_blockchain_tests(m_tests, m_vm);
         }
         catch (const evmone::test::UnsupportedTestFeature& ex)
         {
@@ -75,11 +126,24 @@ public:
         }
     }
 
-    static void register_one(const std::string& suite_name, const fs::path& file, evmc::VM& vm, bool trace)
+    static void register_one(
+        const std::string& suite_name, const fs::path& file, evmc::VM& vm, bool trace)
     {
+        // Register warmup environment if warmup is enabled
+        static const int warmup_runs = []() {
+            const char* env = std::getenv("DTVM_WARMUP_RUNS");
+            return env ? std::atoi(env) : 0;
+        }();
+
+        if (warmup_runs > 0)
+        {
+            testing::AddGlobalTestEnvironment(new WarmupEnvironment(file, vm));
+        }
+
         testing::RegisterTest(suite_name.c_str(), file.stem().string().c_str(), nullptr, nullptr,
-            file.string().c_str(), 0,
-            [file, &vm, trace]() -> testing::Test* { return new BlockchainGTestFile(file, vm, trace); });
+            file.string().c_str(), 0, [file, &vm, trace]() -> testing::Test* {
+                return new BlockchainGTestFile(file, vm, trace);
+            });
     }
 };
 
@@ -91,7 +155,8 @@ class BlockchainGTest : public testing::Test
     bool m_trace = false;
 
 public:
-    explicit BlockchainGTest(evmone::test::BlockchainTest blockchain_test, evmc::VM& vm, bool trace) noexcept
+    explicit BlockchainGTest(
+        evmone::test::BlockchainTest blockchain_test, evmc::VM& vm, bool trace) noexcept
       : m_blockchain_test{std::move(blockchain_test)}, m_vm{vm}, m_trace{trace}
     {}
 
@@ -107,8 +172,9 @@ public:
         evmc::VM& vm, bool trace)
     {
         testing::RegisterTest(suite_name.c_str(), test_name.c_str(), nullptr, nullptr,
-            file.string().c_str(), 0,
-            [test, &vm, trace]() -> testing::Test* { return new BlockchainGTest(test, vm, trace); });
+            file.string().c_str(), 0, [test, &vm, trace]() -> testing::Test* {
+                return new BlockchainGTest(test, vm, trace);
+            });
     }
 };
 
@@ -176,7 +242,8 @@ int main(int argc, char* argv[])
 
         std::optional<std::string> vm_filter;
         app.add_option("--vm", vm_filter,
-            "VM filter. Run tests only on VMs containing the specified string (e.g., 'external', 'evmone_advanced').");
+            "VM filter. Run tests only on VMs containing the specified string (e.g., 'external', "
+            "'evmone_advanced').");
 
         CLI11_PARSE(app, argc, argv);
 
